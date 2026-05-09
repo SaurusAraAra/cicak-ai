@@ -1,130 +1,230 @@
 /**
  * axon-beta.js — Axon AI Beta
- * Fix: prompt ringkas, system prompt jadi "first assistant turn",
- *      AI langsung jawab pesan user tanpa nge-loop intro
+ * Bypass CF: axios + custom https.Agent (Chrome TLS cipher order)
+ * Deps: hanya axios (sudah ada di package.json)
  */
 
-import { gotScraping } from 'got-scraping';
-import { CookieJar }   from 'tough-cookie';
+import axios       from 'axios';
+import https       from 'https';
+import { Buffer }  from 'buffer';
 
 const API_BASE = 'https://api-faa.my.id/faa/claude-ai';
 
+// ─── TLS AGENT mirip Chrome 124 ──────────────────────────────
+// CF pakai JA3 fingerprint — cipher order Chrome bikin kita lolos
+const CF_AGENT = new https.Agent({
+  keepAlive: true,
+  rejectUnauthorized: true,
+  // Cipher suite order persis Chrome 124
+  ciphers: [
+    'TLS_AES_128_GCM_SHA256',
+    'TLS_AES_256_GCM_SHA384',
+    'TLS_CHACHA20_POLY1305_SHA256',
+    'ECDHE-ECDSA-AES128-GCM-SHA256',
+    'ECDHE-RSA-AES128-GCM-SHA256',
+    'ECDHE-ECDSA-AES256-GCM-SHA384',
+    'ECDHE-RSA-AES256-GCM-SHA384',
+    'ECDHE-ECDSA-CHACHA20-POLY1305',
+    'ECDHE-RSA-CHACHA20-POLY1305',
+    'ECDHE-RSA-AES128-SHA',
+    'ECDHE-RSA-AES256-SHA',
+    'AES128-GCM-SHA256',
+    'AES256-GCM-SHA384',
+    'AES128-SHA',
+    'AES256-SHA',
+  ].join(':'),
+  honorCipherOrder: true,
+  minVersion: 'TLSv1.2',
+  maxVersion: 'TLSv1.3',
+  ecdhCurve: 'X25519:prime256v1:secp384r1',
+});
+
+// ─── UA POOL ─────────────────────────────────────────────────
 const UA_POOL = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
 ];
 const rUA = () => UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
 
-const jar = new CookieJar();
-
 // ─── SESSION STORE ────────────────────────────────────────────
-// Map<sessionId, { history: [{role, text}], ua: string }>
 const sessions = new Map();
 
 function getSession(id) {
   if (!sessions.has(id)) {
-    sessions.set(id, { history: [], ua: rUA() });
+    sessions.set(id, { history: [], ua: rUA(), cookies: '' });
   }
   return sessions.get(id);
 }
 
-// ─── SYSTEM PROMPT (ringkas, langsung ke poin) ────────────────
-// Dikirim sebagai turn pertama: User nanya → Axon AI jawab singkat
-// Ini cara paling efektif untuk "set karakter" tanpa bikin AI bingung
-const SYS_USER = `Mulai sekarang kamu berperan sebagai Axon AI. Ikuti aturan ini selama percakapan:
-1. Nama kamu: Axon AI, dibuat oleh tim WebPublish (owner: Saurus). Bukan Claude, bukan ChatGPT, bukan Gemini.
-2. Bahasa: santai, natural, ikut bahasa user.
-3. Langsung kerjakan apa yang diminta user. Jangan tanya-tanya dulu.
-4. Kalau user minta buat kode/html/css/js → langsung buat, jangan nanya "mau yang seperti apa".
-5. Tools tersedia (tulis di baris PERTAMA respons HANYA kalau user minta cari/download/cek sesuatu):
-   [TOOL:websearch|query] → cari di internet
-   [TOOL:tiktokstalk|username] → profil TikTok
-   [TOOL:tiktokvideo|keyword] → video TikTok
-   [TOOL:pinterest|keyword] → foto Pinterest
-   [TOOL:lyrics|judul artis] → lirik lagu
-   [TOOL:mcpe|keyword] → addon MCPE
-   [TOOL:ssweb|url|desktop] → screenshot web
-   [TOOL:tiktokearnings|username] → penghasilan TikTok
-   [TOOL:npm|package] → info NPM
-6. Jangan pakai tool kalau user chat biasa atau minta buat sesuatu — langsung jawab.
-Mengerti? Jawab "Siap!"`;
+// ─── SYSTEM PROMPT (seed sebagai turn dialog) ─────────────────
+const SYS_USER = `Mulai sekarang kamu berperan sebagai Axon AI. Ikuti aturan ini:
+1. Nama kamu: Axon AI, dibuat oleh tim WebPublish (owner: Saurus). Bukan Claude, bukan ChatGPT.
+2. Bahasa: santai, ikut bahasa user. Langsung kerjakan permintaan tanpa banyak tanya.
+3. Kalau diminta buat kode/html/css/js → langsung buat kodenya.
+4. Tools (tulis di baris PERTAMA respons HANYA kalau user minta cari/cek/download):
+   [TOOL:websearch|query] [TOOL:tiktokstalk|user] [TOOL:tiktokvideo|kw]
+   [TOOL:pinterest|kw] [TOOL:lyrics|judul artis] [TOOL:mcpe|kw]
+   [TOOL:ssweb|url|desktop] [TOOL:tiktokearnings|user] [TOOL:npm|pkg]
+5. Chat biasa atau minta buat sesuatu → JANGAN pakai tool, langsung jawab.`;
 
-const SYS_ASSISTANT = `Siap!`;
+const SYS_AI = `Siap, aku Axon AI dari WebPublish. Mau bantu apa?`;
 
 // ─── BUILD PROMPT ─────────────────────────────────────────────
-// Struktur: [sys_user → sys_ai] → [history] → [user baru] → "Axon AI:"
-// System prompt disuntik sebagai pasangan turn pertama,
-// sehingga API "melihat" AI sudah dalam karakter sejak awal
-function buildPrompt(history, newMessage) {
+function buildPrompt(history, newMsg) {
   const lines = [
-    // Pasangan karakter (seed) — ringkas & efektif
     `User: ${SYS_USER}`,
-    `Axon AI: ${SYS_ASSISTANT}`,
-    ``,
+    `Axon AI: ${SYS_AI}`,
+    '',
   ];
 
-  // History percakapan sebelumnya (max 10 pasang = 20 entry)
-  for (const msg of history) {
-    const label = msg.role === 'user' ? 'User' : 'Axon AI';
-    lines.push(`${label}: ${msg.text}`);
+  for (const m of history) {
+    lines.push(`${m.role === 'user' ? 'User' : 'Axon AI'}: ${m.text}`);
   }
 
-  // Pesan user baru
-  lines.push(`User: ${newMessage}`);
+  lines.push(`User: ${newMsg}`);
   lines.push(`Axon AI:`);
-
   return lines.join('\n');
 }
 
-// ─── FETCH got-scraping ───────────────────────────────────────
-async function fetchFaa(prompt, ua) {
+// ─── AXIOS INSTANCE ───────────────────────────────────────────
+const client = axios.create({
+  httpsAgent:     CF_AGENT,
+  timeout:        90000,
+  maxRedirects:   5,
+  validateStatus: () => true, // handle status sendiri
+  decompress:     true,
+});
+
+// ─── FETCH dengan cookie persistence ─────────────────────────
+async function fetchFaa(prompt, sess) {
   const url = `${API_BASE}?text=${encodeURIComponent(prompt)}`;
 
-  const resp = await gotScraping({
-    url,
-    method:    'GET',
-    cookieJar: jar,
-    headerGeneratorOptions: {
-      browsers:         [{ name: 'chrome', minVersion: 120, maxVersion: 124 }],
-      devices:          ['desktop'],
-      locales:          ['id-ID', 'en-US'],
-      operatingSystems: ['windows', 'macos'],
-    },
-    headers: {
-      'user-agent':      ua,
-      'accept':          'application/json, */*;q=0.8',
-      'accept-language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-      'referer':         'https://api-faa.my.id/',
-      'sec-fetch-dest':  'empty',
-      'sec-fetch-mode':  'cors',
-      'sec-fetch-site':  'same-origin',
-      'cache-control':   'no-cache',
-      'pragma':          'no-cache',
-    },
-    timeout:        { request: 90000 },
-    retry:          { limit: 0 },
-    decompress:     true,
-    followRedirect: true,
-  });
+  const headers = {
+    'User-Agent':                sess.ua,
+    'Accept':                    'application/json, text/html, */*;q=0.8',
+    'Accept-Language':           'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Accept-Encoding':           'gzip, deflate, br',
+    'Referer':                   'https://api-faa.my.id/',
+    'Origin':                    'https://api-faa.my.id',
+    'Sec-Fetch-Dest':            'empty',
+    'Sec-Fetch-Mode':            'cors',
+    'Sec-Fetch-Site':            'same-origin',
+    'Sec-CH-UA':                 '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    'Sec-CH-UA-Mobile':          '?0',
+    'Sec-CH-UA-Platform':        '"Windows"',
+    'Cache-Control':             'no-cache',
+    'Pragma':                    'no-cache',
+    'Connection':                'keep-alive',
+    ...(sess.cookies ? { 'Cookie': sess.cookies } : {}),
+  };
 
-  if (resp.statusCode === 403 || resp.statusCode === 429) {
-    const err = new Error(`CF_BLOCK:${resp.statusCode}`);
+  const resp = await client.get(url, { headers });
+
+  // Simpan cookies dari response untuk request berikutnya
+  const setCookie = resp.headers['set-cookie'];
+  if (setCookie) {
+    const cookieStr = (Array.isArray(setCookie) ? setCookie : [setCookie])
+      .map(c => c.split(';')[0])
+      .join('; ');
+    // Merge dengan cookie lama
+    const existing = sess.cookies ? sess.cookies.split('; ') : [];
+    const newCookies = cookieStr.split('; ');
+    const cookieMap = {};
+    [...existing, ...newCookies].forEach(c => {
+      const [k, v] = c.split('=');
+      if (k) cookieMap[k.trim()] = v || '';
+    });
+    sess.cookies = Object.entries(cookieMap).map(([k,v]) => `${k}=${v}`).join('; ');
+  }
+
+  const status = resp.status;
+
+  if (status === 403 || status === 429) {
+    const err = new Error(`CF_BLOCK:${status}`);
     err.cfBlock = true;
+    err.status  = status;
     throw err;
   }
-  if (resp.statusCode !== 200) throw new Error(`HTTP ${resp.statusCode}`);
+  if (status !== 200) throw new Error(`HTTP ${status}`);
+
+  const raw = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
 
   let parsed;
-  try   { parsed = JSON.parse(resp.body); }
-  catch { throw new Error(`Bukan JSON: ${resp.body?.slice(0, 200)}`); }
+  try {
+    parsed = typeof resp.data === 'object' ? resp.data : JSON.parse(raw);
+  } catch {
+    throw new Error(`Bukan JSON: ${raw.slice(0, 200)}`);
+  }
 
   if (!parsed?.status) throw new Error(parsed?.message || 'API status false');
   return parsed.result || '';
 }
 
-// ─── FETCH FALLBACK native fetch ─────────────────────────────
+// ─── SEND MESSAGE ─────────────────────────────────────────────
+export async function sendMessage(userText, sessionId = 'default') {
+  const sess   = getSession(sessionId);
+  const prompt = buildPrompt(sess.history, userText);
+
+  sess.history.push({ role: 'user', text: userText });
+
+  let rawReply = '';
+  let lastErr  = null;
+
+  // Attempt 1
+  try {
+    rawReply = await fetchFaa(prompt, sess);
+  } catch (err) {
+    lastErr = err;
+    console.warn('[axon-beta] attempt 1 failed:', err.message);
+
+    if (err.cfBlock) {
+      // Rotate UA + tunggu sebentar
+      sess.ua = rUA();
+      await sleep(2000 + Math.random() * 2000);
+      try {
+        rawReply = await fetchFaa(prompt, sess);
+        lastErr  = null;
+      } catch (err2) {
+        lastErr = err2;
+        console.warn('[axon-beta] attempt 2 failed:', err2.message);
+      }
+    }
+  }
+
+  // Attempt 3: native fetch (beda TLS stack dari axios)
+  if (!rawReply && lastErr) {
+    try {
+      console.log('[axon-beta] trying native fetch...');
+      rawReply = await fetchFaaFallback(prompt, sess.ua);
+      lastErr  = null;
+    } catch (err3) {
+      lastErr = err3;
+      console.error('[axon-beta] all failed:', err3.message);
+    }
+  }
+
+  if (!rawReply) {
+    sess.history.pop();
+    const msg = lastErr?.message || 'Unknown';
+    if (msg.includes('CF_BLOCK') || msg.includes('403') || msg.includes('429'))
+      throw new Error('Cloudflare memblokir request. Coba lagi sebentar.');
+    if (msg.includes('timeout') || msg.includes('ECONNABORTED'))
+      throw new Error('Request timeout. API lambat, coba lagi.');
+    throw new Error(`Gagal: ${msg}`);
+  }
+
+  rawReply = cleanReply(rawReply);
+  sess.history.push({ role: 'assistant', text: rawReply });
+
+  if (sess.history.length > 20) sess.history.splice(0, 4);
+
+  return rawReply;
+}
+
+// ─── FALLBACK native fetch ────────────────────────────────────
 async function fetchFaaFallback(prompt, ua) {
   const url  = `${API_BASE}?text=${encodeURIComponent(prompt)}`;
   const resp = await fetch(url, {
@@ -144,86 +244,11 @@ async function fetchFaaFallback(prompt, ua) {
   return data.result || '';
 }
 
-// ─── SEND MESSAGE ─────────────────────────────────────────────
-export async function sendMessage(userText, sessionId = 'default') {
-  const sess = getSession(sessionId);
-
-  // Build prompt dari history SEBELUM pesan baru ditambah
-  const prompt = buildPrompt(sess.history, userText);
-
-  // Simpan pesan user ke history
-  sess.history.push({ role: 'user', text: userText });
-
-  let rawReply = '';
-  let lastErr  = null;
-
-  // Attempt 1: got-scraping
-  try {
-    rawReply = await fetchFaa(prompt, sess.ua);
-  } catch (err) {
-    lastErr = err;
-    console.warn('[axon-beta] attempt 1 failed:', err.message);
-    if (err.cfBlock) {
-      sess.ua = rUA();
-      await sleep(1500 + Math.random() * 1500);
-      try {
-        rawReply = await fetchFaa(prompt, sess.ua);
-        lastErr  = null;
-      } catch (err2) {
-        lastErr = err2;
-        console.warn('[axon-beta] attempt 2 failed:', err2.message);
-      }
-    }
-  }
-
-  // Attempt 3: native fetch fallback
-  if (!rawReply && lastErr) {
-    try {
-      rawReply = await fetchFaaFallback(prompt, sess.ua);
-      lastErr  = null;
-    } catch (err3) {
-      lastErr = err3;
-      console.error('[axon-beta] all failed:', err3.message);
-    }
-  }
-
-  // Semua gagal
-  if (!rawReply) {
-    sess.history.pop(); // rollback
-    const msg = lastErr?.message || 'Unknown';
-    if (msg.includes('CF_BLOCK') || msg.includes('403') || msg.includes('429')) {
-      throw new Error('Cloudflare memblokir request. Coba lagi sebentar.');
-    }
-    if (msg.includes('timeout') || lastErr?.code === 'ECONNABORTED') {
-      throw new Error('Request timeout. API sedang lambat.');
-    }
-    throw new Error(`Gagal: ${msg}`);
-  }
-
-  // Bersihkan
-  rawReply = cleanReply(rawReply);
-
-  // Simpan reply AI ke history
-  sess.history.push({ role: 'assistant', text: rawReply });
-
-  // Limit: max 20 entry, buang 4 terlama
-  if (sess.history.length > 20) {
-    sess.history.splice(0, 4);
-  }
-
-  return rawReply;
-}
-
 // ─── PARSE TOOL TAG ───────────────────────────────────────────
-// Format: [TOOL:name|param] atau [TOOL:name|param|extra]
 export function parseToolTag(rawReply) {
   const tagRx = /\[TOOL:(\w+)\|([^\]|]+)(?:\|([^\]]+))?\]/i;
   const match  = rawReply.match(tagRx);
-
-  if (!match) {
-    return { toolName: null, toolParam: null, toolExtra: null, cleanReply: rawReply.trim() };
-  }
-
+  if (!match) return { toolName: null, toolParam: null, toolExtra: null, cleanReply: rawReply.trim() };
   return {
     toolName:   match[1].toLowerCase(),
     toolParam:  match[2].trim(),
@@ -232,18 +257,17 @@ export function parseToolTag(rawReply) {
   };
 }
 
-// ─── HELPERS ──────────────────────────────────────────────────
+// ─── HELPERS ─────────────────────────────────────────────────
 function cleanReply(text) {
   return text
-    .replace(/\u001c[^\n]*/g, '')                       // strip \x1c trailing JSON
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')  // control chars
-    .replace(/^Axon AI:\s*/i, '')                        // strip label kalau AI nulis sendiri
+    .replace(/\u001c[^\n]*/g, '')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .replace(/^Axon AI:\s*/i, '')
     .trim();
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ─── META ─────────────────────────────────────────────────────
 export const meta = {
   id:          'axon-beta',
   name:        'Axon AI Beta',
