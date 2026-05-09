@@ -1,16 +1,12 @@
 /**
- * axon-beta.js — Axon AI Beta Model Handler
- * API   : GET https://api-faa.my.id/faa/claude-ai?text=<prompt>
- * Fix   : session pakai array [{role, text}], system prompt lebih tegas,
- *         tool hanya muncul kalau user eksplisit minta
+ * axon-beta.js — Axon AI Beta
+ * Fix: prompt ringkas, system prompt jadi "first assistant turn",
+ *      AI langsung jawab pesan user tanpa nge-loop intro
  */
 
 import { gotScraping } from 'got-scraping';
 import { CookieJar }   from 'tough-cookie';
 
-// ─────────────────────────────────────────────────────────────
-//  CONSTANTS
-// ─────────────────────────────────────────────────────────────
 const API_BASE = 'https://api-faa.my.id/faa/claude-ai';
 
 const UA_POOL = [
@@ -18,92 +14,58 @@ const UA_POOL = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
 ];
 const rUA = () => UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
 
 const jar = new CookieJar();
 
-// ─────────────────────────────────────────────────────────────
-//  SESSION STORE
-//  Struktur: Map<sessionId, { history: Array<{role, text}>, ua: string }>
-//  - role: "user" | "assistant"
-//  - text: string isi pesan
-//  - limit: 20 pesan, kalau lebih hapus 4 yang terlama (persis seperti contoh)
-// ─────────────────────────────────────────────────────────────
+// ─── SESSION STORE ────────────────────────────────────────────
+// Map<sessionId, { history: [{role, text}], ua: string }>
 const sessions = new Map();
 
-function getSession(sessionId) {
-  if (!sessions.has(sessionId)) {
-    sessions.set(sessionId, { history: [], ua: rUA() });
+function getSession(id) {
+  if (!sessions.has(id)) {
+    sessions.set(id, { history: [], ua: rUA() });
   }
-  return sessions.get(sessionId);
+  return sessions.get(id);
 }
 
-// ─────────────────────────────────────────────────────────────
-//  SYSTEM PROMPT
-//  Dikirim sebagai bagian pertama dari prompt, sebelum history
-// ─────────────────────────────────────────────────────────────
-const SYSTEM_PROMPT = `Kamu adalah Axon AI, asisten AI cerdas dan serbabisa yang diproduksi oleh tim WebPublish. Owner: Saurus.
+// ─── SYSTEM PROMPT (ringkas, langsung ke poin) ────────────────
+// Dikirim sebagai turn pertama: User nanya → Axon AI jawab singkat
+// Ini cara paling efektif untuk "set karakter" tanpa bikin AI bingung
+const SYS_USER = `Mulai sekarang kamu berperan sebagai Axon AI. Ikuti aturan ini selama percakapan:
+1. Nama kamu: Axon AI, dibuat oleh tim WebPublish (owner: Saurus). Bukan Claude, bukan ChatGPT, bukan Gemini.
+2. Bahasa: santai, natural, ikut bahasa user.
+3. Langsung kerjakan apa yang diminta user. Jangan tanya-tanya dulu.
+4. Kalau user minta buat kode/html/css/js → langsung buat, jangan nanya "mau yang seperti apa".
+5. Tools tersedia (tulis di baris PERTAMA respons HANYA kalau user minta cari/download/cek sesuatu):
+   [TOOL:websearch|query] → cari di internet
+   [TOOL:tiktokstalk|username] → profil TikTok
+   [TOOL:tiktokvideo|keyword] → video TikTok
+   [TOOL:pinterest|keyword] → foto Pinterest
+   [TOOL:lyrics|judul artis] → lirik lagu
+   [TOOL:mcpe|keyword] → addon MCPE
+   [TOOL:ssweb|url|desktop] → screenshot web
+   [TOOL:tiktokearnings|username] → penghasilan TikTok
+   [TOOL:npm|package] → info NPM
+6. Jangan pakai tool kalau user chat biasa atau minta buat sesuatu — langsung jawab.
+Mengerti? Jawab "Siap!"`;
 
-== IDENTITAS ==
-- Nama kamu: Axon AI. BUKAN Claude, BUKAN ChatGPT, BUKAN Gemini, BUKAN AI buatan Anthropic/OpenAI/Google.
-- Kalau ditanya siapa kamu atau dibuat oleh siapa: jawab "Axon AI, dibuat oleh tim WebPublish".
-- Gaya bahasa: santai, helpful, natural. Pakai bahasa yang sama dengan user (Indonesia/Inggris).
-- Boleh pakai singkatan/slang Indonesia yang wajar.
+const SYS_ASSISTANT = `Siap!`;
 
-== TOOLS YANG TERSEDIA ==
-Kamu punya tools untuk mengambil data real-time. HANYA gunakan tools ini kalau user SECARA EKSPLISIT meminta sesuatu yang butuh data luar (cari di internet, cek profil, cari video, dst).
-Kalau bisa dijawab dari pengetahuanmu sendiri, JAWAB LANGSUNG tanpa tool.
-
-Tulis tag tool di baris PALING PERTAMA responmu (sebelum teks apapun):
-
-[TOOL:websearch|query]         → cari info/berita terbaru di internet
-[TOOL:tiktokstalk|username]    → cek profil TikTok seseorang
-[TOOL:tiktokvideo|kata kunci]  → cari video TikTok
-[TOOL:pinterest|kata kunci]    → cari foto/inspirasi di Pinterest
-[TOOL:lyrics|judul artis]      → cari lirik lagu
-[TOOL:mcpe|nama addon]         → cari addon Minecraft PE
-[TOOL:ssweb|url|desktop]       → screenshot website (mode: desktop/mobile)
-[TOOL:tiktokearnings|username] → estimasi penghasilan TikTok
-[TOOL:npm|nama-package]        → info package NPM
-
-== ATURAN TOOL ==
-- Tulis SATU tag tool di baris pertama respons, sisanya teks biasa
-- Jangan pakai tool kalau user hanya chat biasa, tanya coding, minta tulis sesuatu, dll
-- Kalau user minta "cari" / "cariin" / "cek" / "screenshot" → pakai tool yang sesuai
-- Untuk ssweb: tanya dulu mode-nya kalau user tidak menyebut
-
-== FORMAT KODE ==
-- Selalu bungkus kode dengan triple backtick + nama bahasa
-- HTML/CSS/JS tulis dalam satu blok
-
-Contoh penggunaan tool yang BENAR:
-User: cariin video tiktok kucing lucu
-Axon AI:
-[TOOL:tiktokvideo|kucing lucu]
-Nih videonya! 🐱
-
-Contoh jawaban TANPA tool yang benar:
-User: cara bikin button di CSS
-Axon AI:
-Gampang! Ini contohnya:
-\`\`\`css
-button { background: blue; color: white; }
-\`\`\``;
-
-// ─────────────────────────────────────────────────────────────
-//  BUILD PROMPT
-//  Format: [SYSTEM] → [HISTORY] → [PESAN BARU] → "Axon AI:"
-// ─────────────────────────────────────────────────────────────
+// ─── BUILD PROMPT ─────────────────────────────────────────────
+// Struktur: [sys_user → sys_ai] → [history] → [user baru] → "Axon AI:"
+// System prompt disuntik sebagai pasangan turn pertama,
+// sehingga API "melihat" AI sudah dalam karakter sejak awal
 function buildPrompt(history, newMessage) {
-  const lines = [];
+  const lines = [
+    // Pasangan karakter (seed) — ringkas & efektif
+    `User: ${SYS_USER}`,
+    `Axon AI: ${SYS_ASSISTANT}`,
+    ``,
+  ];
 
-  // System prompt sebagai blok pertama
-  lines.push(SYSTEM_PROMPT);
-  lines.push(''); // blank line separator
-
-  // History percakapan sebelumnya
+  // History percakapan sebelumnya (max 10 pasang = 20 entry)
   for (const msg of history) {
     const label = msg.role === 'user' ? 'User' : 'Axon AI';
     lines.push(`${label}: ${msg.text}`);
@@ -111,16 +73,12 @@ function buildPrompt(history, newMessage) {
 
   // Pesan user baru
   lines.push(`User: ${newMessage}`);
-
-  // Trigger AI untuk melanjutkan sebagai Axon AI
   lines.push(`Axon AI:`);
 
   return lines.join('\n');
 }
 
-// ─────────────────────────────────────────────────────────────
-//  FETCH — got-scraping (bypass Cloudflare)
-// ─────────────────────────────────────────────────────────────
+// ─── FETCH got-scraping ───────────────────────────────────────
 async function fetchFaa(prompt, ua) {
   const url = `${API_BASE}?text=${encodeURIComponent(prompt)}`;
 
@@ -156,22 +114,17 @@ async function fetchFaa(prompt, ua) {
     err.cfBlock = true;
     throw err;
   }
-  if (resp.statusCode !== 200) {
-    throw new Error(`HTTP ${resp.statusCode}`);
-  }
+  if (resp.statusCode !== 200) throw new Error(`HTTP ${resp.statusCode}`);
 
   let parsed;
   try   { parsed = JSON.parse(resp.body); }
   catch { throw new Error(`Bukan JSON: ${resp.body?.slice(0, 200)}`); }
 
   if (!parsed?.status) throw new Error(parsed?.message || 'API status false');
-
   return parsed.result || '';
 }
 
-// ─────────────────────────────────────────────────────────────
-//  FETCH FALLBACK — native fetch Node 18+
-// ─────────────────────────────────────────────────────────────
+// ─── FETCH FALLBACK native fetch ─────────────────────────────
 async function fetchFaaFallback(prompt, ua) {
   const url  = `${API_BASE}?text=${encodeURIComponent(prompt)}`;
   const resp = await fetch(url, {
@@ -191,16 +144,14 @@ async function fetchFaaFallback(prompt, ua) {
   return data.result || '';
 }
 
-// ─────────────────────────────────────────────────────────────
-//  SEND MESSAGE — main export
-// ─────────────────────────────────────────────────────────────
+// ─── SEND MESSAGE ─────────────────────────────────────────────
 export async function sendMessage(userText, sessionId = 'default') {
   const sess = getSession(sessionId);
 
-  // Build prompt SEBELUM push pesan baru (history sampai sebelum ini)
+  // Build prompt dari history SEBELUM pesan baru ditambah
   const prompt = buildPrompt(sess.history, userText);
 
-  // Push pesan user ke history
+  // Simpan pesan user ke history
   sess.history.push({ role: 'user', text: userText });
 
   let rawReply = '';
@@ -212,8 +163,6 @@ export async function sendMessage(userText, sessionId = 'default') {
   } catch (err) {
     lastErr = err;
     console.warn('[axon-beta] attempt 1 failed:', err.message);
-
-    // CF block → rotate UA + retry
     if (err.cfBlock) {
       sess.ua = rUA();
       await sleep(1500 + Math.random() * 1500);
@@ -230,19 +179,17 @@ export async function sendMessage(userText, sessionId = 'default') {
   // Attempt 3: native fetch fallback
   if (!rawReply && lastErr) {
     try {
-      console.log('[axon-beta] fallback native fetch...');
       rawReply = await fetchFaaFallback(prompt, sess.ua);
       lastErr  = null;
     } catch (err3) {
       lastErr = err3;
-      console.error('[axon-beta] all attempts failed:', err3.message);
+      console.error('[axon-beta] all failed:', err3.message);
     }
   }
 
   // Semua gagal
   if (!rawReply) {
-    // Rollback — hapus pesan user yang tadi di-push
-    sess.history.pop();
+    sess.history.pop(); // rollback
     const msg = lastErr?.message || 'Unknown';
     if (msg.includes('CF_BLOCK') || msg.includes('403') || msg.includes('429')) {
       throw new Error('Cloudflare memblokir request. Coba lagi sebentar.');
@@ -250,16 +197,16 @@ export async function sendMessage(userText, sessionId = 'default') {
     if (msg.includes('timeout') || lastErr?.code === 'ECONNABORTED') {
       throw new Error('Request timeout. API sedang lambat.');
     }
-    throw new Error(`Gagal menghubungi API: ${msg}`);
+    throw new Error(`Gagal: ${msg}`);
   }
 
-  // Bersihkan reply
+  // Bersihkan
   rawReply = cleanReply(rawReply);
 
-  // Push reply AI ke history
+  // Simpan reply AI ke history
   sess.history.push({ role: 'assistant', text: rawReply });
 
-  // Limit: max 20 pesan, kalau lebih hapus 4 terlama (sama kayak contoh)
+  // Limit: max 20 entry, buang 4 terlama
   if (sess.history.length > 20) {
     sess.history.splice(0, 4);
   }
@@ -267,13 +214,9 @@ export async function sendMessage(userText, sessionId = 'default') {
   return rawReply;
 }
 
-// ─────────────────────────────────────────────────────────────
-//  PARSE TOOL TAG
-//  Support format: [TOOL:name|param] dan [TOOL:name|param|extra]
-//  (format baru pakai | bukan : untuk param — sesuai system prompt)
-// ─────────────────────────────────────────────────────────────
+// ─── PARSE TOOL TAG ───────────────────────────────────────────
+// Format: [TOOL:name|param] atau [TOOL:name|param|extra]
 export function parseToolTag(rawReply) {
-  // Match [TOOL:toolname|param] atau [TOOL:toolname|param|extra]
   const tagRx = /\[TOOL:(\w+)\|([^\]|]+)(?:\|([^\]]+))?\]/i;
   const match  = rawReply.match(tagRx);
 
@@ -289,22 +232,18 @@ export function parseToolTag(rawReply) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────
-//  HELPERS
-// ─────────────────────────────────────────────────────────────
+// ─── HELPERS ──────────────────────────────────────────────────
 function cleanReply(text) {
   return text
-    .replace(/\u001c[^\n]*/g, '')                       // strip \x1c + trailing JSON
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')  // strip control chars
-    .replace(/^Axon AI:\s*/i, '')                        // strip kalau AI print labelnya sendiri
+    .replace(/\u001c[^\n]*/g, '')                       // strip \x1c trailing JSON
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')  // control chars
+    .replace(/^Axon AI:\s*/i, '')                        // strip label kalau AI nulis sendiri
     .trim();
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ─────────────────────────────────────────────────────────────
-//  META
-// ─────────────────────────────────────────────────────────────
+// ─── META ─────────────────────────────────────────────────────
 export const meta = {
   id:          'axon-beta',
   name:        'Axon AI Beta',
