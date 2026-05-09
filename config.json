@@ -1,0 +1,12 @@
+{
+  "models": [
+    {
+      "id": "axon-beta",
+      "name": "Axon AI Beta",
+      "description": "Model default Axon AI dari tim WebPublish. Cerdas, cepat, dan lengkap dengan tools.",
+      "file": "models/axon-beta.js",
+      "badge": "BETA",
+      "default": true
+    }
+  ]
+}

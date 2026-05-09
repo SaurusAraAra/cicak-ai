@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>404 — Axon AI</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@700;800&family=Space+Grotesk:wght@400;500&display=swap" rel="stylesheet"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#060A14;color:#F0F6FF;font-family:'Space Grotesk',sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center;padding:2rem;overflow:hidden}
+
+.bg-orb{position:fixed;top:50%;left:50%;transform:translate(-50%,-60%);width:700px;height:500px;background:radial-gradient(ellipse,rgba(37,99,235,.08) 0%,transparent 65%);pointer-events:none;animation:pulse 6s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.6}50%{opacity:1}}
+
+.wrap{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:1.2rem}
+
+.code{font-family:'Outfit',sans-serif;font-size:clamp(6rem,18vw,10rem);font-weight:800;line-height:1;letter-spacing:-.05em;color:transparent;-webkit-text-stroke:1px rgba(37,99,235,.25);position:relative;animation:fu .5s ease both}
+.code::after{content:'404';position:absolute;inset:0;color:#2563EB;-webkit-text-stroke:0;clip-path:inset(0 100% 0 0);animation:reveal 1s .3s cubic-bezier(.77,0,.18,1) forwards}
+@keyframes reveal{to{clip-path:inset(0 0% 0 0)}}
+@keyframes fu{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
+
+.glitch{position:relative;display:inline-block}
+.glitch::before,.glitch::after{content:'404';position:absolute;inset:0;opacity:.7}
+.glitch::before{color:#2563EB;animation:glitch1 3s infinite;clip-path:polygon(0 20%,100% 20%,100% 40%,0 40%)}
+.glitch::after{color:#60A5FA;animation:glitch2 3s infinite;clip-path:polygon(0 60%,100% 60%,100% 80%,0 80%)}
+@keyframes glitch1{0%,94%,100%{transform:none}95%{transform:translate(-3px,1px)}97%{transform:translate(3px,-1px)}}
+@keyframes glitch2{0%,92%,100%{transform:none}93%{transform:translate(3px,2px)}95%{transform:translate(-3px,-2px)}}
+
+h1{font-family:'Outfit',sans-serif;font-size:clamp(1.4rem,4vw,1.9rem);font-weight:800;letter-spacing:-.02em;animation:fu .5s .15s ease both;opacity:0}
+h1 span{color:#2563EB}
+
+p{color:#4B5875;font-size:.92rem;line-height:1.7;max-width:320px;animation:fu .5s .25s ease both;opacity:0}
+
+.actions{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;animation:fu .5s .35s ease both;opacity:0}
+.btn-main{display:inline-flex;align-items:center;gap:7px;background:#2563EB;color:#F0F6FF;padding:11px 28px;border-radius:6px;text-decoration:none;font-family:'Outfit',sans-serif;font-weight:700;font-size:.85rem;letter-spacing:.04em;transition:all .2s}
+.btn-main:hover{background:#1D4ED8;transform:translateY(-2px);box-shadow:0 8px 28px rgba(37,99,235,.3)}
+.btn-ghost{display:inline-flex;align-items:center;gap:7px;background:transparent;color:#4B5875;padding:11px 22px;border-radius:6px;text-decoration:none;border:1px solid rgba(255,255,255,.08);font-family:'Space Grotesk',sans-serif;font-size:.85rem;transition:all .2s}
+.btn-ghost:hover{color:#F0F6FF;border-color:rgba(255,255,255,.18);background:rgba(255,255,255,.04)}
+
+.foot{margin-top:1rem;font-size:.65rem;color:#3A3636;letter-spacing:.1em;text-transform:uppercase;animation:fu .5s .45s ease both;opacity:0}
+</style>
+</head>
+<body>
+<div class="bg-orb"></div>
+<div class="wrap">
+  <div class="code glitch">404</div>
+  <h1>Halaman <span>Tidak Ditemukan</span></h1>
+  <p>URL yang kamu akses tidak tersedia di WebPublish. Mungkin sudah dipindah atau belum dibuat.</p>
+  <div class="actions">
+    <a class="btn-main" href="/">← Beranda</a>
+    <a class="btn-ghost" href="/chat">⚡ Axon AI</a>
+  </div>
+  <div class="foot">WebPublish &copy; 2025 &mdash; Owner: Saurus</div>
+</div>
+</body>
+</html>
