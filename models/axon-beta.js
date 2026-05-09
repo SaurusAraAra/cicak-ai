@@ -10,7 +10,7 @@ import axios from 'axios';
 
 // ── CONFIG ───────────────────────────────────────────────
 const API_URL = 'https://ai.siputzx.my.id';
-const MODEL   = 'qwen3.5-plus';   // model beta siputzx
+const MODEL   = 'qwen3-coder-plus';   // model beta siputzx
 
 // ── SESSION MEMORY ────────────────────────────────────────
 // Simpan history per session_id (in-memory, reset on restart)
