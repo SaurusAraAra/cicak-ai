@@ -1,28 +1,40 @@
 /**
  * axon-beta.js
  * Model handler — Axon AI Beta
- * API: https://ai.siputzx.my.id (siputzx)
- * Endpoint: POST /
- * Body: { content, user, model }
+ * API   : GET https://api-faa.my.id/faa/claude-ai?text=<prompt>
+ * Author: Faa API (Cloudflare protected — wajib pakai headers lengkap)
+ * Resp  : { status, creator, result, timestamp, response_time }
+ *
+ * Catatan:
+ *  - Response kadang ada trailing \u001c{...} — dibersihkan di cleanRawReply()
+ *  - Session memory dikelola in-memory per session_id (max ~3000 char context)
  */
 
 import axios from 'axios';
 
-// ── CONFIG ───────────────────────────────────────────────
-const API_URL = 'https://ai.siputzx.my.id';
-const MODEL   = 'qwen3-coder-plus';   // model beta siputzx
+// ── CONFIG ────────────────────────────────────────────────
+const API_BASE = 'https://api-faa.my.id/faa/claude-ai';
+
+// Rotate UA biar lebih natural ke Cloudflare
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
+];
+const rUA = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 
 // ── SESSION MEMORY ────────────────────────────────────────
-// Simpan history per session_id (in-memory, reset on restart)
-const sessions = new Map(); // session_id → string (context ringkas)
+const sessions = new Map(); // session_id → context string
 
 // ── SYSTEM PROMPT ─────────────────────────────────────────
-const SYSTEM_PROMPT = `Kamu adalah Axon AI, asisten kecerdasan buatan cerdas yang dibuat oleh tim WebPublish (owner: Saurus). Kamu membantu pengguna menjawab pertanyaan, menganalisis informasi, menulis, coding, dan banyak lagi.
+const SYSTEM_PROMPT = `Kamu adalah Axon AI, asisten kecerdasan buatan yang dibuat oleh tim WebPublish (owner: Saurus). Kamu membantu pengguna menjawab pertanyaan, menganalisis, menulis, coding, dan banyak lagi.
 
-Kamu memiliki akses ke tools berikut. Jika pengguna memintamu melakukan salah satu hal ini, gunakan tag tool yang sesuai di akhir responmu:
+Kamu memiliki akses ke tools berikut. Gunakan tag tool di akhir responmu jika pengguna memintamu:
 
-TOOLS YANG TERSEDIA:
-- Cari di internet/web/Google → [TOOL:websearch:query]
+TOOLS:
+- Cari di internet/Google → [TOOL:websearch:query]
 - Cek profil TikTok → [TOOL:tiktokstalk:username]
 - Cari video TikTok → [TOOL:tiktokvideo:keyword]
 - Cari foto Pinterest → [TOOL:pinterest:keyword]
@@ -33,106 +45,140 @@ TOOLS YANG TERSEDIA:
 - Info package NPM → [TOOL:npm:nama-package]
 
 ATURAN TOOL:
-1. Gunakan maksimal 1 tag tool per respons
-2. Tag tool ditulis di baris terakhir respons, tidak di tengah
-3. Jika butuh cari informasi terkini, gunakan [TOOL:websearch:...]
-4. Jawab dulu sebelum tool jika perlu konteks
+1. Maksimal 1 tag tool per respons
+2. Tag tool di baris paling akhir
+3. Untuk info terkini, selalu gunakan [TOOL:websearch:...]
 
 KEPRIBADIAN:
-- Cerdas, ramah, dan to the point
-- Jawaban dalam Bahasa Indonesia (kecuali diminta lain)
-- Tidak lebay, tidak pakai emoji berlebihan
-- Jika tidak tahu sesuatu, cari dulu via websearch daripada mengarang
+- Cerdas, ramah, langsung ke inti
+- Jawab dalam Bahasa Indonesia (kecuali diminta lain)
+- Tidak lebay, tidak berlebihan emoji
+- Jangan sebut diri sebagai AI lain (ChatGPT, Gemini, Qwen, dll)
+- Nama kamu: Axon AI`;
 
-Nama kamu: Axon AI. Jangan pernah menyebut diri sebagai AI lain (ChatGPT, Gemini, dll).`;
-
-// ── SEND MESSAGE ─────────────────────────────────────────
+// ── SEND MESSAGE ──────────────────────────────────────────
 export async function sendMessage(userText, sessionId = 'default') {
-  // Ambil context session sebelumnya
-  const prevContext = sessions.get(sessionId) || '';
+  const prevCtx = sessions.get(sessionId) || '';
 
-  // Gabungkan context + pesan baru ke dalam content
-  const fullContent = prevContext
-    ? `${prevContext}\n\nUser: ${userText}`
-    : userText;
+  // Bangun prompt lengkap: system + history + pesan baru
+  const prompt = buildPrompt(prevCtx, userText);
 
-  let reply = '';
+  let rawReply = '';
 
   try {
-    const { data } = await axios.post(
-      `${API_URL}/`,
-      {
-        content: `${SYSTEM_PROMPT}\n\n${fullContent}`,
-        user:    sessionId,
-        model:   MODEL,
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept':       'application/json',
-          'User-Agent':   'AxonAI/1.0 (+https://webpublish.id)',
-        },
-        timeout: 60000,
-      }
-    );
+    const ua = rUA();
 
-    // API returns: { result: "..." }
-    reply = data?.result || data?.response || data?.message || '';
-    if (!reply && typeof data === 'string') reply = data;
-    if (!reply) throw new Error('Empty response dari API');
+    const { data } = await axios.get(API_BASE, {
+      params: { text: prompt },
+      headers: {
+        // Header wajib untuk bypass Cloudflare
+        'User-Agent':                ua,
+        'Accept':                    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language':           'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding':           'gzip, deflate, br',
+        'Connection':                'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest':            'document',
+        'Sec-Fetch-Mode':            'navigate',
+        'Sec-Fetch-Site':            'none',
+        'Sec-Fetch-User':            '?1',
+        'Cache-Control':             'max-age=0',
+        'Referer':                   'https://api-faa.my.id/',
+        'Origin':                    'https://api-faa.my.id',
+      },
+      timeout: 90000, // API lambat (6s+), kasih waktu lebih
+      maxRedirects: 5,
+    });
+
+    // Response: { status, result, creator, timestamp, response_time }
+    if (!data?.status) {
+      throw new Error(data?.message || 'API mengembalikan status false');
+    }
+
+    rawReply = data?.result || '';
+    if (!rawReply) throw new Error('Result kosong dari API');
+
+    // Bersihkan karakter control aneh di akhir (seperti \u001c{...} dari contoh)
+    rawReply = cleanRawReply(rawReply);
 
   } catch (err) {
-    const status = err?.response?.status;
-    const msg    = err?.response?.data?.message || err.message;
-    console.error(`[axon-beta] API error (${status}):`, msg);
-    throw new Error(`Gagal menghubungi model: ${msg}`);
+    const status  = err?.response?.status;
+    const errMsg  = err?.response?.data?.message || err.message;
+    console.error(`[axon-beta] API error (HTTP ${status || 'timeout'}):`, errMsg);
+
+    // Cloudflare block detection
+    if (status === 403 || status === 429) {
+      throw new Error('Akses ditolak oleh Cloudflare. Coba lagi sebentar.');
+    }
+    if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT') {
+      throw new Error('Request timeout. API sedang lambat, coba lagi.');
+    }
+
+    throw new Error(`Gagal menghubungi model: ${errMsg}`);
   }
 
-  // Simpan context baru (ringkas: hanya 3 pasang terakhir agar tidak overflow)
-  const newContext = trimContext(prevContext, userText, reply);
-  sessions.set(sessionId, newContext);
+  // Update session context
+  sessions.set(sessionId, trimContext(prevCtx, userText, rawReply));
 
-  return reply;
+  return rawReply;
 }
 
 // ── PARSE TOOL TAG ────────────────────────────────────────
-/**
- * Ekstrak [TOOL:name:param|extra] dari reply AI
- * Returns: { toolName, toolParam, toolExtra, cleanReply }
- */
 export function parseToolTag(rawReply) {
+  // Match: [TOOL:toolname:param] atau [TOOL:toolname:param|extra]
   const tagRx = /\[TOOL:(\w+):([^\]|]+)(?:\|([^\]]+))?\]/i;
   const match  = rawReply.match(tagRx);
 
   if (!match) {
-    return { toolName: null, toolParam: null, toolExtra: null, cleanReply: rawReply.trim() };
+    return {
+      toolName:   null,
+      toolParam:  null,
+      toolExtra:  null,
+      cleanReply: rawReply.trim(),
+    };
   }
 
-  const toolName  = match[1].toLowerCase();
-  const toolParam = match[2].trim();
-  const toolExtra = match[3]?.trim() || null;
-  const cleanReply = rawReply.replace(tagRx, '').trim();
-
-  return { toolName, toolParam, toolExtra, cleanReply };
+  return {
+    toolName:   match[1].toLowerCase(),
+    toolParam:  match[2].trim(),
+    toolExtra:  match[3]?.trim() || null,
+    cleanReply: rawReply.replace(tagRx, '').trim(),
+  };
 }
 
 // ── HELPERS ───────────────────────────────────────────────
+function buildPrompt(prevCtx, userText) {
+  if (prevCtx) {
+    return `${SYSTEM_PROMPT}\n\n--- Riwayat percakapan ---\n${prevCtx}\n\n--- Pesan baru ---\nUser: ${userText}\nAxon AI:`;
+  }
+  return `${SYSTEM_PROMPT}\n\nUser: ${userText}\nAxon AI:`;
+}
+
 function trimContext(prev, userMsg, aiReply) {
-  // Tambah ronde baru
-  const round = `User: ${userMsg}\nAxon AI: ${aiReply}`;
-
-  // Gabungkan dan potong agar tidak terlalu panjang (maks ~3000 char)
+  // Bersihkan reply dari tool tag sebelum disimpan ke context
+  const cleanAI = aiReply.replace(/\[TOOL:[^\]]+\]/gi, '').trim();
+  const round   = `User: ${userMsg}\nAxon AI: ${cleanAI}`;
   const combined = prev ? `${prev}\n\n${round}` : round;
-  if (combined.length <= 3000) return combined;
 
-  // Potong dari depan
+  // Maks ~3000 char supaya prompt tidak meledak
+  if (combined.length <= 3000) return combined;
   return combined.slice(combined.length - 3000);
 }
 
+function cleanRawReply(text) {
+  // Hapus trailing control chars seperti \u001c{"character_cooldown":true}
+  // dan karakter non-printable lainnya di akhir
+  return text
+    .replace(/\u001c[^\n]*/g, '')   // strip \x1c + sisa JSON
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '') // strip control chars
+    .trim();
+}
+
+// ── META ──────────────────────────────────────────────────
 export const meta = {
   id:          'axon-beta',
   name:        'Axon AI Beta',
-  description: 'Model default Axon AI dari tim WebPublish. Cerdas, cepat, dan lengkap dengan tools.',
+  description: 'Model default Axon AI oleh WebPublish. Powered by claude via faa API.',
   badge:       'BETA',
   default:     true,
 };
