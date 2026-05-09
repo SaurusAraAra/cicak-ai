@@ -1,199 +1,282 @@
 /**
  * axon-beta.js — Axon AI Beta
- * Strategi bypass CF (tanpa deps baru, cukup axios + Node built-in):
- *   1. axios + custom TLS (cipher order Chrome 124, JA3 spoof)
- *      + cookie persistence antar request
- *   2. axios retry dengan UA baru setelah rotate
- *   3. undici (built-in Node 18) dengan HTTP/2 → beda fingerprint TLS
- *   4. native fetch sebagai last resort
+ * Bypass chain:
+ *   1. Playwright Chromium (real browser, bypass CF sepenuhnya)
+ *   2. got-scraping (TLS fingerprint spoof)
+ *   3. undici (custom TLS options)
+ *   4. native fetch fallback
  */
 
-import axios       from 'axios';
-import https       from 'https';
-import { fetch as undiciFetch, Agent as UndiciAgent } from 'undici';
+import { CookieJar } from 'tough-cookie';
 
 const API_BASE = 'https://api-faa.my.id/faa/claude-ai';
 
-// ─── TLS AGENT — cipher order Chrome 124 ─────────────────────
-const makeTLSAgent = () => new https.Agent({
-  keepAlive:          true,
-  keepAliveMsecs:     10000,
-  rejectUnauthorized: true,
-  ciphers: [
-    'TLS_AES_128_GCM_SHA256',
-    'TLS_AES_256_GCM_SHA384',
-    'TLS_CHACHA20_POLY1305_SHA256',
-    'ECDHE-ECDSA-AES128-GCM-SHA256',
-    'ECDHE-RSA-AES128-GCM-SHA256',
-    'ECDHE-ECDSA-AES256-GCM-SHA384',
-    'ECDHE-RSA-AES256-GCM-SHA384',
-    'ECDHE-ECDSA-CHACHA20-POLY1305',
-    'ECDHE-RSA-CHACHA20-POLY1305',
-    'ECDHE-RSA-AES128-SHA',
-    'ECDHE-RSA-AES256-SHA',
-    'AES128-GCM-SHA256',
-    'AES256-GCM-SHA384',
-    'AES128-SHA',
-    'AES256-SHA',
-  ].join(':'),
-  honorCipherOrder: true,
-  minVersion:       'TLSv1.2',
-  maxVersion:       'TLSv1.3',
-  ecdhCurve:        'X25519:prime256v1:secp384r1',
-});
-
-// ─── UNDICI AGENT (HTTP/2, beda TLS fingerprint dari axios) ──
-const undiciAgent = new UndiciAgent({
-  connect: {
-    rejectUnauthorized: true,
-    ALPNProtocols:      ['h2', 'http/1.1'],
-  },
-  allowH2: true,
-});
-
-// ─── UA POOL ─────────────────────────────────────────────────
 const UA_POOL = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0',
 ];
 const rUA = () => UA_POOL[Math.floor(Math.random() * UA_POOL.length)];
+const jar = new CookieJar();
+
+// ─── CF cookies dari Playwright disimpan di sini ──────────────
+let cfCookieCache = null;   // { cookies: string, ua: string, ts: number }
+const CF_COOKIE_TTL = 25 * 60 * 1000; // 25 menit
 
 // ─── SESSION STORE ────────────────────────────────────────────
-// Map<id, { history: [{role,text}], ua: string, cookies: string, agent: https.Agent }>
 const sessions = new Map();
-
 function getSession(id) {
-  if (!sessions.has(id)) {
-    sessions.set(id, {
-      history: [],
-      ua:      rUA(),
-      cookies: '',
-      agent:   makeTLSAgent(),
-    });
-  }
+  if (!sessions.has(id)) sessions.set(id, { history: [], ua: rUA() });
   return sessions.get(id);
 }
 
 // ─── SYSTEM PROMPT ────────────────────────────────────────────
-const SYS_USER = `Mulai sekarang kamu berperan sebagai Axon AI. Ikuti aturan ini:
-1. Nama kamu: Axon AI, dibuat oleh tim WebPublish (owner: Saurus). Bukan Claude, bukan ChatGPT.
-2. Bahasa: santai, ikut bahasa user. Langsung kerjakan permintaan tanpa banyak tanya.
-3. Kalau diminta buat kode/html/css/js → langsung buat kodenya.
-4. Tools (tulis di baris PERTAMA respons HANYA kalau user minta cari/cek/download):
-   [TOOL:websearch|query] [TOOL:tiktokstalk|user] [TOOL:tiktokvideo|kw]
-   [TOOL:pinterest|kw] [TOOL:lyrics|judul artis] [TOOL:mcpe|kw]
-   [TOOL:ssweb|url|desktop] [TOOL:tiktokearnings|user] [TOOL:npm|pkg]
-5. Chat biasa atau minta buat sesuatu → JANGAN pakai tool, langsung jawab.`;
+const SYS_USER = `Mulai sekarang kamu berperan sebagai Axon AI. Ikuti aturan ini selama percakapan:
+1. Nama kamu: Axon AI, dibuat oleh tim WebPublish (owner: Saurus). Bukan Claude, bukan ChatGPT, bukan Gemini.
+2. Bahasa: santai, natural, ikut bahasa user.
+3. Langsung kerjakan apa yang diminta user. Jangan tanya-tanya dulu kalau sudah jelas.
+4. Kalau user minta buat kode/html/css/js → langsung buat, jangan nanya "mau yang seperti apa".
+5. Tools tersedia (tulis di baris PERTAMA respons HANYA kalau user minta cari/cek data real-time):
+   [TOOL:websearch|query] → cari di internet
+   [TOOL:tiktokstalk|username] → profil TikTok
+   [TOOL:tiktokvideo|keyword] → video TikTok
+   [TOOL:pinterest|keyword] → foto Pinterest
+   [TOOL:lyrics|judul artis] → lirik lagu
+   [TOOL:mcpe|keyword] → addon MCPE
+   [TOOL:ssweb|url|desktop] → screenshot web
+   [TOOL:tiktokearnings|username] → penghasilan TikTok
+   [TOOL:npm|package] → info NPM
+6. Jangan pakai tool kalau user chat biasa atau minta buat sesuatu. Langsung jawab.
+Mengerti?`;
 
-const SYS_AI = `Siap, aku Axon AI dari WebPublish. Mau bantu apa?`;
+const SYS_ASSISTANT = `Siap! Aku Axon AI, asisten dari WebPublish. Mau bantu apa?`;
 
-// ─── BUILD PROMPT ─────────────────────────────────────────────
-function buildPrompt(history, newMsg) {
+function buildPrompt(history, newMessage) {
   const lines = [
     `User: ${SYS_USER}`,
-    `Axon AI: ${SYS_AI}`,
-    '',
+    `Axon AI: ${SYS_ASSISTANT}`,
+    ``,
   ];
-  for (const m of history) {
-    lines.push(`${m.role === 'user' ? 'User' : 'Axon AI'}: ${m.text}`);
+  for (const msg of history) {
+    lines.push(`${msg.role === 'user' ? 'User' : 'Axon AI'}: ${msg.text}`);
   }
-  lines.push(`User: ${newMsg}`);
+  lines.push(`User: ${newMessage}`);
   lines.push(`Axon AI:`);
   return lines.join('\n');
 }
 
-// ─── HEADERS BUILDER ─────────────────────────────────────────
-function buildHeaders(ua, cookies, extraSec = '') {
-  return {
-    'User-Agent':         ua,
-    'Accept':             'application/json, text/html, */*;q=0.8',
-    'Accept-Language':    'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding':    'gzip, deflate, br',
-    'Referer':            'https://api-faa.my.id/',
-    'Origin':             'https://api-faa.my.id',
-    'Sec-Fetch-Dest':     'empty',
-    'Sec-Fetch-Mode':     'cors',
-    'Sec-Fetch-Site':     'same-origin',
-    'Sec-CH-UA':          `"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"`,
-    'Sec-CH-UA-Mobile':   '?0',
-    'Sec-CH-UA-Platform': '"Windows"',
-    'Cache-Control':      'no-cache',
-    'Pragma':             'no-cache',
-    'Connection':         'keep-alive',
-    ...(cookies ? { Cookie: cookies } : {}),
-  };
+// ═══════════════════════════════════════════════════════════════
+//  METHOD 1: PLAYWRIGHT (real Chromium browser)
+//  - Bypass CF sepenuhnya karena pakai browser asli
+//  - Cache cf_clearance cookie biar tidak perlu buka browser tiap request
+// ═══════════════════════════════════════════════════════════════
+async function fetchViaPlaywright(prompt) {
+  let playwright, browser, context, page;
+  try {
+    playwright = await import('playwright');
+  } catch {
+    throw new Error('Playwright not available');
+  }
+
+  const url = `${API_BASE}?text=${encodeURIComponent(prompt)}`;
+
+  try {
+    browser = await playwright.chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',          // penting di Railway (container)
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-sync',
+        '--disable-translate',
+        '--hide-scrollbars',
+        '--metrics-recording-only',
+        '--mute-audio',
+        '--safebrowsing-disable-auto-update',
+      ],
+    });
+
+    const ua = rUA();
+    context = await browser.newContext({
+      userAgent: ua,
+      locale: 'id-ID',
+      extraHTTPHeaders: {
+        'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept': 'application/json, */*',
+      },
+    });
+
+    page = await context.newPage();
+
+    // Kalau ada CF cookie cache yang masih valid, inject dulu
+    if (cfCookieCache && Date.now() - cfCookieCache.ts < CF_COOKIE_TTL) {
+      await context.addCookies(cfCookieCache.cookies);
+    }
+
+    // Navigate ke API URL
+    const response = await page.goto(url, {
+      waitUntil: 'networkidle',
+      timeout: 30000,
+    });
+
+    // Kalau masih CF challenge page, tunggu
+    let bodyText = await page.evaluate(() => document.body.innerText).catch(() => '');
+
+    // Cek apakah ada CF challenge
+    if (response?.status() === 403 || bodyText.includes('Just a moment') || bodyText.includes('challenge')) {
+      // Tunggu CF selesai (max 15 detik)
+      await page.waitForFunction(
+        () => !document.title.includes('Just a moment') && document.body.innerText.length > 20,
+        { timeout: 15000 }
+      ).catch(() => {});
+      bodyText = await page.evaluate(() => document.body.innerText).catch(() => '');
+    }
+
+    // Simpan CF cookies untuk request berikutnya
+    const cookies = await context.cookies();
+    cfCookieCache = { cookies, ts: Date.now() };
+
+    // Parse JSON dari body
+    let parsed;
+    try {
+      // Coba ambil dari response body langsung
+      const rawBody = bodyText.trim();
+      // Kadang playwright dapet pre-formatted, ambil dari pre tag
+      const preText = await page.evaluate(() => {
+        const pre = document.querySelector('pre, body');
+        return pre?.innerText || document.body.innerText;
+      }).catch(() => rawBody);
+
+      parsed = JSON.parse(preText.trim());
+    } catch {
+      throw new Error(`Playwright: response bukan JSON — ${bodyText.slice(0, 200)}`);
+    }
+
+    if (!parsed?.status) throw new Error(parsed?.message || 'API status false');
+    return parsed.result || '';
+
+  } finally {
+    await page?.close().catch(() => {});
+    await context?.close().catch(() => {});
+    await browser?.close().catch(() => {});
+  }
 }
 
-// ─── SAVE COOKIES ─────────────────────────────────────────────
-function saveCookies(sess, setCookieHeader) {
-  if (!setCookieHeader) return;
-  const incoming = (Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader])
-    .map(c => c.split(';')[0]);
-  const map = {};
-  (sess.cookies ? sess.cookies.split('; ') : []).forEach(c => {
-    const [k, v] = c.split('='); if (k) map[k.trim()] = v || '';
-  });
-  incoming.forEach(c => {
-    const [k, v] = c.split('='); if (k) map[k.trim()] = v || '';
-  });
-  sess.cookies = Object.entries(map).map(([k, v]) => `${k}=${v}`).join('; ');
-}
+// ═══════════════════════════════════════════════════════════════
+//  METHOD 2: GOT-SCRAPING (TLS fingerprint spoof)
+// ═══════════════════════════════════════════════════════════════
+async function fetchViaGotScraping(prompt, ua) {
+  let gotScraping;
+  try {
+    ({ gotScraping } = await import('got-scraping'));
+  } catch {
+    throw new Error('got-scraping not available');
+  }
 
-// ─── ATTEMPT 1 & 2: axios + Chrome TLS ───────────────────────
-async function fetchAxios(prompt, sess) {
-  const url  = `${API_BASE}?text=${encodeURIComponent(prompt)}`;
-  const resp = await axios.get(url, {
-    httpsAgent:     sess.agent,
-    timeout:        90000,
-    maxRedirects:   5,
-    validateStatus: () => true,
-    decompress:     true,
-    headers:        buildHeaders(sess.ua, sess.cookies),
+  const url = `${API_BASE}?text=${encodeURIComponent(prompt)}`;
+
+  const resp = await gotScraping({
+    url,
+    method: 'GET',
+    cookieJar: jar,
+    headerGeneratorOptions: {
+      browsers: [{ name: 'chrome', minVersion: 120, maxVersion: 124 }],
+      devices: ['desktop'],
+      locales: ['id-ID', 'en-US'],
+      operatingSystems: ['windows', 'macos'],
+    },
+    headers: {
+      'user-agent':      ua,
+      'accept':          'application/json, */*;q=0.8',
+      'accept-language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+      'referer':         'https://api-faa.my.id/',
+      'sec-fetch-dest':  'empty',
+      'sec-fetch-mode':  'cors',
+      'sec-fetch-site':  'same-origin',
+      'cache-control':   'no-cache',
+      'pragma':          'no-cache',
+    },
+    timeout: { request: 60000 },
+    retry: { limit: 0 },
+    decompress: true,
+    followRedirect: true,
   });
 
-  saveCookies(sess, resp.headers['set-cookie']);
-
-  if (resp.status === 403 || resp.status === 429) {
-    const err = new Error(`CF_BLOCK:${resp.status}`);
+  if (resp.statusCode === 403 || resp.statusCode === 429) {
+    const err = new Error(`CF_BLOCK:${resp.statusCode}`);
     err.cfBlock = true;
     throw err;
   }
-  if (resp.status !== 200) throw new Error(`HTTP ${resp.status}`);
+  if (resp.statusCode !== 200) throw new Error(`HTTP ${resp.statusCode}`);
 
-  const parsed = typeof resp.data === 'object' ? resp.data : JSON.parse(resp.data);
-  if (!parsed?.status) throw new Error(parsed?.message || 'API false');
+  let parsed;
+  try   { parsed = JSON.parse(resp.body); }
+  catch { throw new Error(`Bukan JSON: ${resp.body?.slice(0, 200)}`); }
+
+  if (!parsed?.status) throw new Error(parsed?.message || 'API status false');
   return parsed.result || '';
 }
 
-// ─── ATTEMPT 3: undici HTTP/2 ────────────────────────────────
-async function fetchUndici(prompt, ua) {
+// ═══════════════════════════════════════════════════════════════
+//  METHOD 3: UNDICI (custom TLS cipher)
+// ═══════════════════════════════════════════════════════════════
+async function fetchViaUndici(prompt, ua) {
+  let undici;
+  try {
+    undici = await import('undici');
+  } catch {
+    throw new Error('undici not available');
+  }
+
   const url  = `${API_BASE}?text=${encodeURIComponent(prompt)}`;
-  const resp = await undiciFetch(url, {
-    method:     'GET',
-    dispatcher: undiciAgent,
-    headers:    buildHeaders(ua, ''),
-    signal:     AbortSignal.timeout(90000),
+  const resp = await undici.fetch(url, {
+    method: 'GET',
+    headers: {
+      'User-Agent':                ua,
+      'Accept':                    'application/json, */*;q=0.8',
+      'Accept-Language':           'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Accept-Encoding':           'gzip, deflate, br',
+      'Referer':                   'https://api-faa.my.id/',
+      'Sec-CH-UA':                 '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+      'Sec-CH-UA-Mobile':          '?0',
+      'Sec-CH-UA-Platform':        '"Windows"',
+      'Sec-Fetch-Dest':            'empty',
+      'Sec-Fetch-Mode':            'cors',
+      'Sec-Fetch-Site':            'same-origin',
+      'Cache-Control':             'no-cache',
+      'Pragma':                    'no-cache',
+      'DNT':                       '1',
+    },
+    signal: AbortSignal.timeout(60000),
   });
+
   if (resp.status === 403 || resp.status === 429) {
     const err = new Error(`CF_BLOCK:${resp.status}`);
     err.cfBlock = true;
     throw err;
   }
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
   const data = await resp.json();
   if (!data?.status) throw new Error(data?.message || 'API false');
   return data.result || '';
 }
 
-// ─── ATTEMPT 4: native fetch ──────────────────────────────────
-async function fetchNative(prompt, ua) {
+// ═══════════════════════════════════════════════════════════════
+//  METHOD 4: NATIVE FETCH fallback
+// ═══════════════════════════════════════════════════════════════
+async function fetchViaNative(prompt, ua) {
   const url  = `${API_BASE}?text=${encodeURIComponent(prompt)}`;
   const resp = await fetch(url, {
-    method:  'GET',
+    method: 'GET',
     headers: {
       'User-Agent':      ua,
       'Accept':          'application/json, */*',
@@ -209,86 +292,71 @@ async function fetchNative(prompt, ua) {
   return data.result || '';
 }
 
-// ─── PARSE RESULT ─────────────────────────────────────────────
-function parseResult(raw) {
-  let parsed;
-  try   { parsed = typeof raw === 'object' ? raw : JSON.parse(raw); }
-  catch { throw new Error(`Bukan JSON: ${String(raw).slice(0, 200)}`); }
-  if (!parsed?.status) throw new Error(parsed?.message || 'API false');
-  return parsed.result || '';
-}
-
-// ─── SEND MESSAGE ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+//  SEND MESSAGE — coba semua method berurutan
+// ═══════════════════════════════════════════════════════════════
 export async function sendMessage(userText, sessionId = 'default') {
   const sess   = getSession(sessionId);
   const prompt = buildPrompt(sess.history, userText);
+
   sess.history.push({ role: 'user', text: userText });
+
+  const ua      = sess.ua;
+  const methods = [
+    { name: 'playwright',   fn: () => fetchViaPlaywright(prompt)        },
+    { name: 'got-scraping', fn: () => fetchViaGotScraping(prompt, ua)   },
+    { name: 'undici',       fn: () => fetchViaUndici(prompt, ua)        },
+    { name: 'native-fetch', fn: () => fetchViaNative(prompt, ua)        },
+  ];
 
   let rawReply = '';
   let lastErr  = null;
 
-  // — Attempt 1: axios Chrome TLS
-  try {
-    rawReply = await fetchAxios(prompt, sess);
-  } catch (err) {
-    lastErr = err;
-    console.warn('[A1 axios]', err.message);
+  for (const method of methods) {
+    try {
+      console.log(`[axon-beta] trying ${method.name}...`);
+      rawReply = await method.fn();
+      if (rawReply) {
+        console.log(`[axon-beta] success via ${method.name}`);
+        break;
+      }
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[axon-beta] ${method.name} failed: ${err.message}`);
 
-    // CF block → rotate UA + agent, tunggu, retry
-    if (err.cfBlock) {
-      sess.ua    = rUA();
-      sess.agent = makeTLSAgent(); // buat TLS connection baru
-      await sleep(2000 + Math.random() * 2000);
-      try {
-        rawReply = await fetchAxios(prompt, sess);
-        lastErr  = null;
-      } catch (err2) {
-        lastErr = err2;
-        console.warn('[A2 axios-retry]', err2.message);
+      // Jangan lanjut ke method berikutnya kalau bukan CF-related error
+      // (misal: Playwright binary tidak ada → langsung ke got-scraping)
+      if (err.message.includes('not available') || err.message.includes('Executable')) {
+        continue; // skip, coba method berikutnya
+      }
+
+      // Kalau CF block, rotate UA sebelum coba method berikutnya
+      if (err.cfBlock) {
+        sess.ua = rUA();
+        await sleep(800);
       }
     }
   }
 
-  // — Attempt 3: undici HTTP/2
-  if (!rawReply && lastErr) {
-    try {
-      console.log('[A3 undici]');
-      await sleep(500 + Math.random() * 1000);
-      rawReply = await fetchUndici(prompt, rUA());
-      lastErr  = null;
-    } catch (err3) {
-      lastErr = err3;
-      console.warn('[A3 undici]', err3.message);
-    }
-  }
-
-  // — Attempt 4: native fetch
-  if (!rawReply && lastErr) {
-    try {
-      console.log('[A4 native]');
-      await sleep(1000 + Math.random() * 1500);
-      rawReply = await fetchNative(prompt, rUA());
-      lastErr  = null;
-    } catch (err4) {
-      lastErr = err4;
-      console.error('[A4 native]', err4.message);
-    }
-  }
-
-  // Semua gagal
   if (!rawReply) {
     sess.history.pop(); // rollback
-    const msg = lastErr?.message || 'Unknown';
-    if (msg.includes('CF_BLOCK') || msg.includes('403') || msg.includes('429'))
-      throw new Error('Cloudflare memblokir request. Coba lagi sebentar.');
-    if (msg.includes('timeout') || msg.includes('ECONNABORTED') || msg.includes('UND_ERR'))
-      throw new Error('Request timeout. API sedang lambat, coba lagi.');
-    throw new Error(`Gagal: ${msg}`);
+    const msg = lastErr?.message || 'Semua method gagal';
+    if (msg.includes('CF_BLOCK') || msg.includes('403') || msg.includes('429')) {
+      throw new Error('Cloudflare memblokir semua request. Coba lagi dalam beberapa detik.');
+    }
+    if (msg.includes('timeout') || lastErr?.code === 'ECONNABORTED') {
+      throw new Error('Request timeout. API sedang lambat.');
+    }
+    throw new Error(`Gagal terhubung ke API: ${msg}`);
   }
 
   rawReply = cleanReply(rawReply);
+
   sess.history.push({ role: 'assistant', text: rawReply });
-  if (sess.history.length > 20) sess.history.splice(0, 4);
+
+  if (sess.history.length > 20) {
+    sess.history.splice(0, 4);
+  }
 
   return rawReply;
 }
@@ -297,7 +365,9 @@ export async function sendMessage(userText, sessionId = 'default') {
 export function parseToolTag(rawReply) {
   const tagRx = /\[TOOL:(\w+)\|([^\]|]+)(?:\|([^\]]+))?\]/i;
   const match  = rawReply.match(tagRx);
-  if (!match) return { toolName: null, toolParam: null, toolExtra: null, cleanReply: rawReply.trim() };
+  if (!match) {
+    return { toolName: null, toolParam: null, toolExtra: null, cleanReply: rawReply.trim() };
+  }
   return {
     toolName:   match[1].toLowerCase(),
     toolParam:  match[2].trim(),
@@ -306,7 +376,7 @@ export function parseToolTag(rawReply) {
   };
 }
 
-// ─── HELPERS ─────────────────────────────────────────────────
+// ─── HELPERS ──────────────────────────────────────────────────
 function cleanReply(text) {
   return text
     .replace(/\u001c[^\n]*/g, '')
