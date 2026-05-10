@@ -673,11 +673,12 @@ function render() { renderSidebar(); renderMessages(); }
 function renderSidebar() {
   const el=document.getElementById('sb-list');
   if (!sessions.length) { el.innerHTML='<div style="padding:1rem 1.2rem;font-size:.71rem;color:var(--muted)">Belum ada sesi</div>'; return; }
+  const total=sessions.length;
   el.innerHTML=sessions.map((s,i)=>`
     <div class="sitem ${i===activeIdx?'active':''}" onclick="switchSession(${i})">
       <div class="sitem-dot"></div>
       <div class="sitem-info">
-        <div class="sitem-name">${esc(s.id)}</div>
+        <div class="sitem-name">Session ${total-i}</div>
         <div class="sitem-prev">${esc(s.preview)}</div>
       </div>
       <button class="sitem-del" onclick="deleteSession(${i},event)">&#x2715;</button>
@@ -685,7 +686,8 @@ function renderSidebar() {
 }
 function renderMessages() {
   const s=sessions[activeIdx]; if(!s) return;
-  document.getElementById('sess-label').innerHTML=`Sesi &mdash; <em>${esc(s.id)}</em>`;
+  const total2=sessions.length;
+  document.getElementById('sess-label').innerHTML=`<em>Session ${total2-activeIdx}</em>`;
   const area=document.getElementById('msgs');
   if (!s.messages.length) { area.innerHTML=`<div class="empty-state"><div class="empty-logo"><img src="/media/logo.png" alt=""/></div><div class="empty-title">Axon AI</div><div class="empty-sub">Tanya apapun, Axon siap menjawab.</div></div>`; return; }
   area.innerHTML=s.messages.map(m=>buildMsgHTML(m)).join('');
