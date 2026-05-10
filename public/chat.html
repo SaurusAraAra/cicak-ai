@@ -433,6 +433,27 @@ body{background:var(--bg);color:var(--white);font-family:var(--fb);display:flex}
 .btn-send:hover{background:var(--blue2);transform:scale(1.04);}
 .btn-send:disabled{opacity:.25;cursor:not-allowed;transform:none;}
 .input-hint{max-width:780px;margin:.3rem auto 0;font-size:.6rem;color:var(--muted);text-align:center;}
+.btn-img{
+  width:36px;height:36px;background:transparent;border:1px solid var(--bd2);border-radius:7px;
+  cursor:pointer;color:var(--muted3);display:none;align-items:center;justify-content:center;
+  transition:all .18s;flex-shrink:0;
+}
+.btn-img.visible{display:flex;}
+.btn-img:hover{color:var(--blue4);border-color:var(--bd3);background:rgba(26,108,246,.08);}
+.btn-img.has-img{color:var(--blue4);border-color:var(--bd3);background:rgba(26,108,246,.1);}
+#img-input{display:none;}
+.img-preview-wrap{
+  max-width:780px;margin:0 auto .4rem;
+  display:none;align-items:center;gap:8px;
+  padding:6px 10px;border-radius:8px;
+  border:1px solid var(--bd2);background:rgba(26,108,246,.04);
+}
+.img-preview-wrap.show{display:flex;}
+.img-preview-thumb{width:38px;height:38px;border-radius:6px;object-fit:cover;border:1px solid var(--bd2);flex-shrink:0;}
+.img-preview-name{flex:1;font-size:.68rem;color:var(--muted3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.img-preview-status{font-size:.62rem;color:var(--muted2);}
+.img-preview-del{background:transparent;border:none;color:var(--muted2);cursor:pointer;font-size:.75rem;padding:2px 5px;border-radius:3px;transition:color .15s;}
+.img-preview-del:hover{color:var(--blue4);}
 
 /* toast */
 .toast{position:fixed;bottom:1.2rem;right:1.2rem;z-index:9999;background:var(--bg4);border:1px solid var(--bd2);border-radius:7px;padding:7px 15px;font-size:.76rem;transform:translateY(8px);opacity:0;transition:all .22s;pointer-events:none;}
@@ -518,7 +539,17 @@ body{background:var(--bg);color:var(--white);font-family:var(--fb);display:flex}
   </div>
 
   <div class="input-wrap">
+    <div class="img-preview-wrap" id="img-preview-wrap">
+      <img class="img-preview-thumb" id="img-preview-thumb" src="" alt=""/>
+      <span class="img-preview-name" id="img-preview-name"></span>
+      <span class="img-preview-status" id="img-preview-status">Siap dikirim</span>
+      <button class="img-preview-del" onclick="clearImage()" title="Hapus gambar">&#x2715;</button>
+    </div>
     <div class="input-box">
+      <input type="file" id="img-input" accept="image/*" onchange="onImageSelect(this)"/>
+      <button class="btn-img" id="btn-img" onclick="document.getElementById('img-input').click()" title="Lampirkan gambar">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="14" height="10" rx="2"/><circle cx="5.5" cy="7" r="1.2"/><path d="M1 11l3.5-3.5L8 11l2.5-2.5L15 13"/></svg>
+      </button>
       <textarea class="chat-ta" id="chat-ta"
         placeholder="Tanya sesuatu atau minta Axon cari informasi..."
         onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat()}"
@@ -622,12 +653,24 @@ function renderModelDrop() {
   document.getElementById('model-btn-txt').textContent = active?.name || 'Model';
   document.getElementById('model-drop').innerHTML = availableModels.map(m =>
     `<div class="mopt ${m.id===activeModelId?'active':''}" onclick="selectModel('${m.id}')">
-      <div class="mopt-icon">&#x26A1;</div>
+      <div class="mopt-icon">${m.bisagambar ? '&#x1F441;' : '&#x26A1;'}</div>
       <div>
         <div class="mopt-name">${esc(m.name)}<span class="mopt-badge">${esc(m.badge||'')}</span></div>
-        <div class="mopt-desc">${esc(m.description||'')}</div>
+        <div class="mopt-desc">${esc(m.description||'')}${m.bisagambar ? ' <span style="color:var(--blue4);font-size:.6rem">&#x1F4F7; Vision</span>' : ''}</div>
       </div>
     </div>`).join('');
+  updateImgBtn();
+}
+function updateImgBtn() {
+  const active = availableModels.find(m => m.id === activeModelId);
+  const btn = document.getElementById('btn-img');
+  if (!btn) return;
+  if (active?.bisagambar) {
+    btn.classList.add('visible');
+  } else {
+    btn.classList.remove('visible');
+    clearImage(); // hapus gambar kalau ganti ke model non-vision
+  }
 }
 function toggleModelDrop() {
   const btn = document.getElementById('model-btn');
@@ -642,6 +685,7 @@ function selectModel(id) {
   document.getElementById('model-drop').classList.remove('show');
   document.getElementById('model-btn').classList.remove('open');
   toast('Model: ' + (availableModels.find(m=>m.id===id)?.name || id));
+  updateImgBtn();
 }
 document.addEventListener('click', e => {
   if (!document.getElementById('model-wrap').contains(e.target)) {
@@ -923,18 +967,99 @@ function updateTypingTool(toolName) {
 }
 
 /* SEND */
+// ── IMAGE STATE ──────────────────────────────────────────────
+let pendingImageFile = null;   // File object
+let pendingImageUrl  = null;   // URL setelah upload ke top4top
+
+function onImageSelect(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  pendingImageFile = file;
+  pendingImageUrl  = null; // reset, belum diupload
+
+  // Preview
+  const reader = new FileReader();
+  reader.onload = e => {
+    document.getElementById('img-preview-thumb').src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+  document.getElementById('img-preview-name').textContent = file.name;
+  document.getElementById('img-preview-status').textContent = 'Siap dikirim';
+  document.getElementById('img-preview-wrap').classList.add('show');
+  document.getElementById('btn-img').classList.add('has-img');
+  input.value = ''; // reset input biar bisa pilih file yang sama lagi
+}
+
+function clearImage() {
+  pendingImageFile = null;
+  pendingImageUrl  = null;
+  document.getElementById('img-preview-wrap').classList.remove('show');
+  document.getElementById('img-preview-thumb').src = '';
+  document.getElementById('img-preview-name').textContent = '';
+  document.getElementById('btn-img').classList.remove('has-img');
+}
+
+async function uploadImageToTop4top(file) {
+  const form = new FormData();
+  // top4top pakai field file_0_ s/d file_9_, sisanya string kosong
+  form.append('file_0_', file, file.name);
+  for (let i = 1; i < 10; i++) form.append(`file_${i}_`, '');
+  form.append('submitr', '[ رفع الملفات ]');
+
+  const resp = await fetch('/api/upload-image', {
+    method: 'POST',
+    body: form,
+  });
+  const data = await resp.json();
+  if (!data.status || !data.results?.[0]) throw new Error(data.message || 'Upload gagal');
+  return data.results[0]; // URL gambar
+}
+
 async function sendChat() {
   const ta=document.getElementById('chat-ta');
-  const txt=ta.value.trim(); if (!txt) return;
+  const txt=ta.value.trim();
+  // Boleh kirim kalau ada teks ATAU ada gambar
+  if (!txt && !pendingImageFile) return;
+
   const s=sessions[activeIdx];
   const btn=document.getElementById('btn-send');
   btn.disabled=true; ta.value=''; ta.style.height='auto';
-  const userMsg={role:'user',html:esc(txt).replace(/\n/g,'<br>')};
+
+  // Tampilkan pesan user (teks + preview gambar jika ada)
+  let userHtml = txt ? esc(txt).replace(/\n/g,'<br>') : '';
+  if (pendingImageFile) {
+    const thumbSrc = document.getElementById('img-preview-thumb').src;
+    userHtml += `<div style="margin-top:6px"><img src="${esc(thumbSrc)}" style="max-width:220px;max-height:160px;border-radius:8px;border:1px solid rgba(59,130,246,.2);display:block;"/></div>`;
+  }
+  const displayText = txt || (pendingImageFile ? '[Gambar]' : '');
+  const userMsg={role:'user',html:userHtml};
   s.messages.push(userMsg);
-  s.preview=txt.slice(0,44)+(txt.length>44?'\u2026':'');
+  s.preview=displayText.slice(0,44)+(displayText.length>44?'\u2026':'');
   save(); appendMsg(userMsg); appendTyping(); renderSidebar();
+
+  // Upload gambar ke top4top jika ada
+  let imageUrl = null;
+  if (pendingImageFile) {
+    try {
+      document.getElementById('img-preview-status').textContent = 'Mengunggah...';
+      imageUrl = await uploadImageToTop4top(pendingImageFile);
+      document.getElementById('img-preview-status').textContent = 'Terkirim';
+      pendingImageUrl = imageUrl;
+    } catch(uploadErr) {
+      document.getElementById('img-preview-status').textContent = 'Gagal upload!';
+      document.getElementById('typing-bub')?.remove();
+      const errMsg={role:'bot',html:`<span style="color:var(--blue4)">Gagal upload gambar: ${esc(uploadErr.message)}</span>`,tool:null,_rawText:''};
+      s.messages.push(errMsg); save(); appendMsg(errMsg);
+      btn.disabled=false; renderSidebar();
+      return;
+    }
+  }
+  clearImage();
+
   try {
-    const res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:txt,session_id:s.apiId,model_id:activeModelId})});
+    const payload = {text: txt||'Analisis gambar ini', session_id: s.apiId, model_id: activeModelId};
+    if (imageUrl) payload.image_url = imageUrl;
+    const res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     const data=await res.json();
     if (data.tool) { updateTypingTool(data.tool.type); await new Promise(r=>setTimeout(r,300)); }
     document.getElementById('typing-bub')?.remove();
