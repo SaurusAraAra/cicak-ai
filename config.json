@@ -12,9 +12,9 @@
     {
       "id": "axon-opgos-1",
       "name": "Axon AI OpGos-1",
-      "description": "Model multimodal berbasis Gemini. Bisa membaca dan menganalisis gambar.",
+      "description": "Model Gaul, coding dll. Bisa membaca dan menganalisis gambar.",
       "file": "models/axon-opgos-1.js",
-      "badge": "VISION",
+      "badge": "OPGOS",
       "bisagambar": true,
       "default": false
     }
