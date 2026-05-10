@@ -311,6 +311,96 @@ async function runTool(name, param, extra) {
 }
 
 // ══════════════════════════════════════════════════════════
+//  API: upload gambar ke top4top
+// ══════════════════════════════════════════════════════════
+const TOP4TOP_UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Mobile Safari/537.36';
+const MAX_IMG_SIZE = 10 * 1024 * 1024; // 10MB
+
+app.post('/api/upload-image', async (req, res) => {
+  try {
+    // Baca raw body multipart manual tanpa multer
+    // Pakai busboy untuk parse multipart
+    const contentType = req.headers['content-type'] || '';
+    if (!contentType.includes('multipart/form-data')) {
+      return res.status(400).json({ status: false, message: 'Content-Type harus multipart/form-data' });
+    }
+
+    // Kumpulkan buffer dari stream
+    const chunks = [];
+    await new Promise((resolve, reject) => {
+      req.on('data', chunk => chunks.push(chunk));
+      req.on('end', resolve);
+      req.on('error', reject);
+    });
+    const rawBody = Buffer.concat(chunks);
+
+    // Extract boundary dari content-type
+    const boundaryMatch = contentType.match(/boundary=([^;]+)/);
+    if (!boundaryMatch) return res.status(400).json({ status: false, message: 'Boundary tidak ditemukan' });
+    const boundary = boundaryMatch[1].trim();
+
+    // Parse multipart sederhana — cari file pertama
+    const boundaryBuf = Buffer.from('--' + boundary);
+    const parts = [];
+    let start = rawBody.indexOf(boundaryBuf);
+    while (start !== -1) {
+      const end = rawBody.indexOf(boundaryBuf, start + boundaryBuf.length);
+      if (end === -1) break;
+      const part = rawBody.slice(start + boundaryBuf.length + 2, end - 2); // skip \r\n
+      const headerEnd = part.indexOf(Buffer.from('\r\n\r\n'));
+      if (headerEnd !== -1) {
+        const headers = part.slice(0, headerEnd).toString();
+        const body    = part.slice(headerEnd + 4);
+        const nameMatch = headers.match(/name="([^"]+)"/i);
+        const fileMatch = headers.match(/filename="([^"]+)"/i);
+        const mimeMatch = headers.match(/Content-Type:\s*([^\r\n]+)/i);
+        if (nameMatch && fileMatch && body.length) {
+          parts.push({
+            fieldName:  nameMatch[1],
+            fileName:   fileMatch[1],
+            mimeType:   mimeMatch ? mimeMatch[1].trim() : 'application/octet-stream',
+            buffer:     body,
+          });
+        }
+      }
+      start = end;
+    }
+
+    if (!parts.length) return res.status(400).json({ status: false, message: 'Tidak ada file yang dikirim' });
+
+    const file = parts[0];
+    if (file.buffer.length > MAX_IMG_SIZE) {
+      return res.status(400).json({ status: false, message: 'File terlalu besar (maks 10MB)' });
+    }
+
+    // Upload ke top4top
+    const form = new FormData();
+    form.append('file_0_', new Blob([file.buffer], { type: file.mimeType }), file.fileName);
+    for (let i = 1; i < 10; i++) form.append('file_' + i + '_', '');
+    form.append('submitr', '[ رفع الملفات ]');
+
+    const uploadResp = await fetch('https://top4top.io/index.php', {
+      method:  'POST',
+      headers: { 'User-Agent': TOP4TOP_UA },
+      body:    form,
+      signal:  AbortSignal.timeout(30000),
+    });
+    if (!uploadResp.ok) throw new Error('top4top HTTP ' + uploadResp.status);
+
+    const html  = await uploadResp.text();
+    const links = [...html.matchAll(/<a\s+onclick="window\.open\(this\.href,'_blank'\);return false;"\s+href="(.*?)"/gi)].map(m => m[1]);
+
+    if (!links.length) throw new Error('Tidak ada link yang didapat dari top4top');
+
+    return res.json({ status: true, total: links.length, results: links });
+
+  } catch (err) {
+    console.error('[upload-image]', err.message);
+    return res.status(500).json({ status: false, message: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════
 //  API: daftar model (untuk frontend)
 // ══════════════════════════════════════════════════════════
 app.get('/api/models', (_, res) => {
@@ -322,6 +412,7 @@ app.get('/api/models', (_, res) => {
       description: m.description,
       badge:       m.badge,
       default:     m.default || false,
+      bisagambar:  m.bisagambar || false,
     })),
   });
 });
@@ -331,21 +422,22 @@ app.get('/api/models', (_, res) => {
 // ══════════════════════════════════════════════════════════
 app.post('/api/chat', chatLimiter, async (req, res) => {
   try {
-    const { text, session_id, model_id } = req.body;
+    const { text, session_id, model_id, image_url } = req.body;
     if (!text || typeof text !== 'string') {
       return res.status(400).json({ ok: false, error: 'Text diperlukan' });
     }
 
     // sanitasi input
-    const safeText = text.trim().slice(0, 4000);
+    const safeText   = text.trim().slice(0, 4000);
+    const safeImgUrl = image_url && typeof image_url === 'string' ? image_url.trim() : null;
 
     // pilih model
     const selectedId = model_id && loadedModels[model_id] ? model_id : defaultModelId;
     const model      = loadedModels[selectedId];
     if (!model) return res.status(500).json({ ok: false, error: 'Model tidak tersedia.' });
 
-    // kirim ke model
-    const rawReply = await model.sendMessage(safeText, session_id || 'default');
+    // kirim ke model (image_url opsional, hanya dipakai model yang support)
+    const rawReply = await model.sendMessage(safeText, session_id || 'default', safeImgUrl);
 
     // parse tool tag
     const { toolName, toolParam, toolExtra, cleanReply } = model.parseToolTag(rawReply);
