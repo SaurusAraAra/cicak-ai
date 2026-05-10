@@ -3,10 +3,20 @@
     {
       "id": "axon-beta",
       "name": "Axon AI Beta",
-      "description": "Model default Axon AI dari tim WebPublish. Cerdas, cepat, dan lengkap dengan tools.",
+      "description": "Model ringan dan cepat untuk percakapan umum.",
       "file": "models/axon-beta.js",
       "badge": "BETA",
+      "bisagambar": false,
       "default": true
+    },
+    {
+      "id": "axon-opgos-1",
+      "name": "Axon AI OpGos-1",
+      "description": "Model multimodal berbasis Gemini. Bisa membaca dan menganalisis gambar.",
+      "file": "models/axon-opgos-1.js",
+      "badge": "VISION",
+      "bisagambar": true,
+      "default": false
     }
   ]
 }
